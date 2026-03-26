@@ -48,13 +48,21 @@ export function readNewLines(
     const bytesToRead = Math.min(stat.size - agent.fileOffset, MAX_READ_BYTES);
     const buf = Buffer.alloc(bytesToRead);
     const fd = fs.openSync(agent.jsonlFile, 'r');
-    fs.readSync(fd, buf, 0, buf.length, agent.fileOffset);
-    fs.closeSync(fd);
+    try {
+      fs.readSync(fd, buf, 0, buf.length, agent.fileOffset);
+    } finally {
+      fs.closeSync(fd);
+    }
     agent.fileOffset += bytesToRead;
 
     const text = agent.lineBuffer + buf.toString('utf-8');
     const lines = text.split('\n');
     agent.lineBuffer = lines.pop() || '';
+
+    // Guard against corrupted files with no newlines — cap buffer at 1MB
+    if (agent.lineBuffer.length > 1_048_576) {
+      agent.lineBuffer = '';
+    }
 
     const hasLines = lines.some((l) => l.trim());
     if (hasLines) {

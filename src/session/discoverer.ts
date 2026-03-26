@@ -173,15 +173,20 @@ export class SessionDiscoverer extends EventEmitter {
       }
 
       // Check for stale agents (file not modified for a long time)
+      // Collect IDs first to avoid mutation during iteration
+      const staleIds: number[] = [];
       for (const [id, agent] of this.agents) {
         try {
           const stat = fs.statSync(agent.jsonlFile);
           if (Date.now() - stat.mtimeMs > SESSION_ACTIVE_THRESHOLD_MS * 10) {
-            this.removeAgent(id);
+            staleIds.push(id);
           }
         } catch {
-          this.removeAgent(id);
+          staleIds.push(id);
         }
+      }
+      for (const id of staleIds) {
+        this.removeAgent(id);
       }
     }, intervalMs);
   }
@@ -213,13 +218,12 @@ export class SessionDiscoverer extends EventEmitter {
     }
   }
 
-  /** Best-effort reverse of the directory hash to a readable path */
+  /** Best-effort reverse of the directory hash to extract just the project name */
   private reverseHashDir(hashedDir: string): string {
-    // Claude Code replaces path separators with '-'
-    // e.g., "-Users-john-myproject" -> "/Users/john/myproject"
-    if (hashedDir.startsWith('-')) {
-      return hashedDir.replace(/-/g, '/');
-    }
-    return hashedDir;
+    // Claude Code hashes: "-Users-john-my-project" — can't reliably reverse
+    // because tirets in folder names are indistinguishable from path separators.
+    // Just extract the last segment as the project name.
+    const parts = hashedDir.split('-').filter(Boolean);
+    return parts[parts.length - 1] || hashedDir;
   }
 }

@@ -35,6 +35,11 @@ export function setupCleanup(
   process.on('SIGTERM', cleanup);
   process.on('uncaughtException', (err) => {
     try {
+      onCleanup();
+    } catch {
+      // Best effort
+    }
+    try {
       terminal.exit();
     } catch {
       process.stdout.write('\x1b[?25h\x1b[?1049l\x1b[0m');

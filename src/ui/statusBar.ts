@@ -53,10 +53,12 @@ export function renderStatusBar(
         : 'Idle';
 
     const statusText = ch.currentStatus || '';
-    const maxStatusLen = cols - 30;
-    const truncatedStatus = statusText.length > maxStatusLen
-      ? statusText.slice(0, maxStatusLen) + '\u2026'
-      : statusText;
+    const maxStatusLen = Math.max(0, cols - 30);
+    const truncatedStatus = maxStatusLen === 0
+      ? ''
+      : statusText.length > maxStatusLen
+        ? statusText.slice(0, maxStatusLen) + '\u2026'
+        : statusText;
 
     const line =
       ansi.clearLine +

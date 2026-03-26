@@ -214,15 +214,23 @@ export async function startOrchestrator(opts: OrchestratorOptions): Promise<void
       const maxW = layout.office.cols * ppc.x;
       const maxH = layout.office.rows * ppc.y;
 
-      // Determine zoom level
+      // Determine zoom level — clamp to prevent massive allocations
+      const MAX_RENDER_PIXELS = 1024 * 1024; // 1 megapixel cap (~4MB buffer)
       let zoom: number;
       if (manualZoom !== null) {
         zoom = manualZoom;
       } else {
-        // Auto-fit zoom
         const zoomX = Math.floor(maxW / officePixelSize.width) || 1;
         const zoomY = Math.floor(maxH / officePixelSize.height) || 1;
         zoom = Math.max(ZOOM_MIN, Math.min(zoomX, zoomY, 4));
+      }
+
+      // Clamp zoom if it would exceed the pixel budget
+      while (
+        zoom > ZOOM_MIN &&
+        officePixelSize.width * zoom * officePixelSize.height * zoom > MAX_RENDER_PIXELS
+      ) {
+        zoom--;
       }
 
       const renderW = officePixelSize.width * zoom;
