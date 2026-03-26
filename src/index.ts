@@ -1,8 +1,11 @@
 /**
  * Main orchestrator: wires session discovery, office simulation, and rendering.
  * Uses real sprites loaded from bundled PNG assets.
+ * Renders the office with proper walls, colored floors, and furniture
+ * based on the default layout JSON.
  */
 
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -19,10 +22,18 @@ import { renderSessionBar } from './ui/sessionBar.js';
 import { setupCleanup, setupInputHandler } from './cli/cleanup.js';
 import { TARGET_FPS_HALFBLOCK, TILE_SIZE, ZOOM_MIN, ZOOM_MAX } from './constants.js';
 import { loadAssets, getCharacterSprite } from './office/sprites/spriteLoader.js';
+import { setFloorSprites, getColorizedFloorSprite, getFloorSprite } from './office/floorTiles.js';
+import { setWallSprites, getWallInstances } from './office/wallTiles.js';
+import { TileType } from './office/types.js';
+import { buildFurnitureCatalog } from '../shared/assets/build.js';
+import { decodeAllFurniture } from '../shared/assets/loader.js';
+
 import type { LoadedAssets } from './office/sprites/spriteLoader.js';
 import type { AgentEvent, DiscoveredSession } from './types.js';
 import type { RendererType } from './renderer/types.js';
 import type { Drawable } from './renderer/base.js';
+import type { OfficeLayout, FurnitureInstance } from './office/types.js';
+import type { TileType as TileTypeVal } from './office/types.js';
 
 export interface OrchestratorOptions {
   renderer: RendererType;
@@ -47,6 +58,31 @@ export async function startOrchestrator(opts: OrchestratorOptions): Promise<void
     assets = { characters: [], floors: [], walls: [] };
   }
 
+  // ── Initialize floor and wall sprite systems ──────────────
+  setFloorSprites(assets.floors);
+  setWallSprites(assets.walls);
+
+  // ── Load the default office layout ────────────────────────
+  let officeLayout: OfficeLayout | null = null;
+  try {
+    const layoutPath = path.resolve(defaultAssetsDir, 'default-layout-1.json');
+    if (fs.existsSync(layoutPath)) {
+      officeLayout = JSON.parse(fs.readFileSync(layoutPath, 'utf-8')) as OfficeLayout;
+    }
+  } catch (err) {
+    console.error('Failed to load office layout:', err);
+  }
+
+  // ── Load furniture catalog and sprites ────────────────────
+  let furnitureSprites: Record<string, string[][]> = {};
+  let furnitureCatalog: ReturnType<typeof buildFurnitureCatalog> = [];
+  try {
+    furnitureCatalog = buildFurnitureCatalog(defaultAssetsDir);
+    furnitureSprites = decodeAllFurniture(defaultAssetsDir, furnitureCatalog);
+  } catch (err) {
+    console.error('Failed to load furniture:', err);
+  }
+
   // ── Terminal & renderer ──────────────────────────────────
   const terminal = new TerminalBuffer();
   let { cols, rows } = terminal.getSize();
@@ -59,7 +95,55 @@ export async function startOrchestrator(opts: OrchestratorOptions): Promise<void
   let manualZoom: number | null = null;
 
   // ── Office simulation ────────────────────────────────────
-  const office = new SimpleOffice();
+  // Use layout dimensions if available, otherwise fall back to defaults
+  const officeCols = officeLayout?.cols ?? 20;
+  const officeRows = officeLayout?.rows ?? 11;
+  const office = new SimpleOffice(officeCols, officeRows);
+
+  // ── Pre-build wall tile map and wall instances (cached) ──
+  let tileMap: TileTypeVal[][] = [];
+  let wallInstances: FurnitureInstance[] = [];
+
+  if (officeLayout) {
+    for (let r = 0; r < officeLayout.rows; r++) {
+      const row: TileTypeVal[] = [];
+      for (let c = 0; c < officeLayout.cols; c++) {
+        row.push(officeLayout.tiles[r * officeLayout.cols + c]);
+      }
+      tileMap.push(row);
+    }
+    wallInstances = getWallInstances(tileMap, officeLayout.tileColors, officeLayout.cols);
+  }
+
+  // ── Pre-build furniture instances ─────────────────────────
+  const furnitureInstances: FurnitureInstance[] = [];
+  if (officeLayout) {
+    // Build a lookup from catalog entry ID to footprint info
+    const catalogLookup = new Map<string, { footprintW: number; footprintH: number }>();
+    for (const entry of furnitureCatalog) {
+      catalogLookup.set(entry.id, { footprintW: entry.footprintW, footprintH: entry.footprintH });
+    }
+
+    for (const furn of officeLayout.furniture) {
+      // Handle ":left" mirrored variants — strip suffix to get the base asset ID
+      const isMirrored = furn.type.endsWith(':left');
+      const assetId = isMirrored ? furn.type.slice(0, -5) : furn.type;
+
+      const sprite = furnitureSprites[assetId];
+      if (!sprite) continue;
+
+      const footprint = catalogLookup.get(assetId);
+      const footprintH = footprint?.footprintH ?? 1;
+
+      furnitureInstances.push({
+        sprite,
+        x: furn.col * TILE_SIZE,
+        y: furn.row * TILE_SIZE + (TILE_SIZE - sprite.length), // anchor at bottom of footprint
+        zY: (furn.row + footprintH) * TILE_SIZE,
+        mirrored: isMirrored || undefined,
+      });
+    }
+  }
 
   // ── Session discovery ────────────────────────────────────
   const discoverer = new SessionDiscoverer();
@@ -172,12 +256,17 @@ export async function startOrchestrator(opts: OrchestratorOptions): Promise<void
   );
 
   // ── Initial scan and watch ───────────────────────────────
+  // Be more aggressive: scan all sessions and check within 5 minutes
   allSessions = discoverer.scan();
-  const activeSessions = allSessions.filter((s) => s.isActive);
 
-  if (activeSessions.length > 0) {
-    discoverer.watchSessions(activeSessions);
-    for (const s of activeSessions) {
+  // When --watch-all is used, watch all sessions regardless of activity
+  const sessionsToWatch = opts.watchAll
+    ? allSessions
+    : allSessions.filter((s) => s.isActive || Date.now() - s.lastModified < 5 * 60 * 1000);
+
+  if (sessionsToWatch.length > 0) {
+    discoverer.watchSessions(sessionsToWatch);
+    for (const s of sessionsToWatch) {
       watchedSessionIds.add(s.sessionId);
     }
   }
@@ -214,18 +303,19 @@ export async function startOrchestrator(opts: OrchestratorOptions): Promise<void
       const maxW = layout.office.cols * ppc.x;
       const maxH = layout.office.rows * ppc.y;
 
-      // Determine zoom level — clamp to prevent massive allocations
-      const MAX_RENDER_PIXELS = 1024 * 1024; // 1 megapixel cap (~4MB buffer)
+      // Determine zoom level — fit the office into the available terminal region
       let zoom: number;
       if (manualZoom !== null) {
         zoom = manualZoom;
       } else {
+        // Auto-fit: find the largest zoom where the office fits in the viewport
         const zoomX = Math.floor(maxW / officePixelSize.width) || 1;
         const zoomY = Math.floor(maxH / officePixelSize.height) || 1;
-        zoom = Math.max(ZOOM_MIN, Math.min(zoomX, zoomY, 4));
+        zoom = Math.max(ZOOM_MIN, Math.min(zoomX, zoomY));
       }
 
-      // Clamp zoom if it would exceed the pixel budget
+      // Clamp to pixel budget (prevent massive allocations)
+      const MAX_RENDER_PIXELS = 1024 * 1024;
       while (
         zoom > ZOOM_MIN &&
         officePixelSize.width * zoom * officePixelSize.height * zoom > MAX_RENDER_PIXELS
@@ -233,8 +323,11 @@ export async function startOrchestrator(opts: OrchestratorOptions): Promise<void
         zoom--;
       }
 
-      const renderW = officePixelSize.width * zoom;
-      const renderH = officePixelSize.height * zoom;
+      // Compute render size — clip to viewport if office is too large even at zoom 1
+      const rawW = officePixelSize.width * zoom;
+      const rawH = officePixelSize.height * zoom;
+      const renderW = Math.min(rawW, maxW);
+      const renderH = Math.min(rawH, maxH);
 
       // Build drawables from characters
       const drawables: Drawable[] = [];
@@ -259,9 +352,17 @@ export async function startOrchestrator(opts: OrchestratorOptions): Promise<void
         });
       }
 
-      // Add floor tile drawables
-      const floorDrawables = createFloorDrawables(office.cols, office.rows, zoom, assets);
+      // Add floor tile drawables (layout-aware)
+      const floorDrawables = createFloorDrawables(office.cols, office.rows, zoom, assets, officeLayout);
       drawables.push(...floorDrawables);
+
+      // Add wall tile drawables
+      const wallDrawables = createWallDrawables(wallInstances, zoom);
+      drawables.push(...wallDrawables);
+
+      // Add furniture drawables
+      const furnDrawables = createFurnitureDrawables(furnitureInstances, zoom);
+      drawables.push(...furnDrawables);
 
       // Rasterize to PixelBuffer
       const pixels = rasterize(renderW, renderH, drawables);
@@ -298,27 +399,49 @@ function extractToolName(status: string): string | null {
   return null;
 }
 
-/** Create floor tile drawables using real assets or fallback */
+/** Create floor tile drawables using real layout data or fallback */
 function createFloorDrawables(
   cols: number,
   rows: number,
   zoom: number,
   assets: LoadedAssets,
+  layout: OfficeLayout | null,
 ): Drawable[] {
   const drawables: Drawable[] = [];
 
   for (let r = 0; r < rows; r++) {
     for (let c = 0; c < cols; c++) {
-      let tileSprite: string[][];
+      let tileSprite: string[][] | null = null;
 
-      if (assets.floors.length > 0) {
-        // Use real floor tiles — alternate between available tiles
-        const tileIndex = (r + c) % assets.floors.length;
-        tileSprite = assets.floors[tileIndex];
+      if (layout) {
+        const tileIndex = r * layout.cols + c;
+        const tileValue = layout.tiles[tileIndex];
+
+        // Skip VOID tiles — the rasterizer background (dark) will show through
+        if (tileValue === TileType.VOID) continue;
+
+        // Skip WALL tiles — they're rendered separately with auto-tiling
+        if (tileValue === TileType.WALL) continue;
+
+        // FLOOR tiles (1-9): use colorized sprites if color data exists
+        const tileColor = layout.tileColors?.[tileIndex] ?? null;
+        if (tileColor) {
+          tileSprite = getColorizedFloorSprite(tileValue, tileColor);
+        } else {
+          // Use raw floor sprite (grayscale)
+          tileSprite = getFloorSprite(tileValue);
+        }
       } else {
-        // Fallback checkerboard
-        tileSprite = createFallbackFloorTile();
+        // No layout: fallback to using raw assets or checkerboard
+        if (assets.floors.length > 0) {
+          const idx = (r + c) % assets.floors.length;
+          tileSprite = assets.floors[idx];
+        } else {
+          tileSprite = createFallbackFloorTile();
+        }
       }
+
+      if (!tileSprite) continue;
 
       const scaledSprite = zoom === 1 ? tileSprite : scaleSprite(tileSprite, zoom);
 
@@ -334,7 +457,42 @@ function createFloorDrawables(
   return drawables;
 }
 
-/** Fallback floor tile when no assets are available */
+/** Convert pre-built wall FurnitureInstances to Drawables with zoom */
+function createWallDrawables(instances: FurnitureInstance[], zoom: number): Drawable[] {
+  const drawables: Drawable[] = [];
+
+  for (const inst of instances) {
+    const sprite = zoom === 1 ? inst.sprite : scaleSprite(inst.sprite, zoom);
+    drawables.push({
+      sprite,
+      x: inst.x * zoom,
+      y: inst.y * zoom,
+      zY: inst.zY * zoom,
+    });
+  }
+
+  return drawables;
+}
+
+/** Convert pre-built furniture FurnitureInstances to Drawables with zoom */
+function createFurnitureDrawables(instances: FurnitureInstance[], zoom: number): Drawable[] {
+  const drawables: Drawable[] = [];
+
+  for (const inst of instances) {
+    const sprite = zoom === 1 ? inst.sprite : scaleSprite(inst.sprite, zoom);
+    drawables.push({
+      sprite,
+      x: inst.x * zoom,
+      y: inst.y * zoom,
+      zY: inst.zY * zoom,
+      mirrored: inst.mirrored,
+    });
+  }
+
+  return drawables;
+}
+
+/** Fallback floor tile when no assets or layout are available */
 function createFallbackFloorTile(): string[][] {
   const sprite: string[][] = [];
   for (let r = 0; r < TILE_SIZE; r++) {
