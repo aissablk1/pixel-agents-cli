@@ -23,6 +23,8 @@ export function parseArgs(argv: string[]): CliOptions {
     .name('pixel-agents')
     .description('Terminal-native pixel art visualization of Claude Code agents')
     .version('0.1.0')
+    .allowUnknownOption(false)
+    .helpOption('-h, --help', 'Display help')
     .option(
       '-r, --renderer <type>',
       `Rendering backend: ${Object.values(RendererType).join('|')}`,

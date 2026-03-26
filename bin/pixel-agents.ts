@@ -8,7 +8,11 @@ import { startOrchestrator } from '../src/index.js';
 import { SessionDiscoverer } from '../src/session/discoverer.js';
 import type { RendererType } from '../src/renderer/types.js';
 
-const opts = parseArgs(process.argv);
+// Normalize common single-dash mistakes: -help → --help, -version → --version
+const normalizedArgv = process.argv.map((arg) =>
+  arg === '-help' ? '--help' : arg === '-version' ? '--version' : arg,
+);
+const opts = parseArgs(normalizedArgv);
 
 // --list-sessions mode: print and exit
 if (opts.listSessions) {
