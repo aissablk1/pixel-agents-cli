@@ -329,39 +329,76 @@ export async function startOrchestrator(opts: OrchestratorOptions): Promise<void
       const renderW = Math.min(rawW, maxW);
       const renderH = Math.min(rawH, maxH);
 
-      // Build drawables from characters
+      // Camera offset: center on the furnished area when viewport < office
+      // Find the bounding box of non-VOID tiles to center the camera
+      let camOffsetX = 0;
+      let camOffsetY = 0;
+      if (renderW < rawW || renderH < rawH) {
+        // Find bounds of non-VOID tiles
+        let minTileC = officeCols, maxTileC = 0, minTileR = officeRows, maxTileR = 0;
+        if (officeLayout) {
+          for (let r = 0; r < officeRows; r++) {
+            for (let c = 0; c < officeCols; c++) {
+              const tile = officeLayout.tiles[r * officeCols + c];
+              if (tile !== 255) { // not VOID
+                minTileC = Math.min(minTileC, c);
+                maxTileC = Math.max(maxTileC, c);
+                minTileR = Math.min(minTileR, r);
+                maxTileR = Math.max(maxTileR, r);
+              }
+            }
+          }
+        }
+        // Center camera on the furnished region
+        const contentCenterX = ((minTileC + maxTileC + 1) / 2) * TILE_SIZE * zoom;
+        const contentCenterY = ((minTileR + maxTileR + 1) / 2) * TILE_SIZE * zoom;
+        camOffsetX = Math.max(0, Math.min(rawW - renderW, Math.round(contentCenterX - renderW / 2)));
+        camOffsetY = Math.max(0, Math.min(rawH - renderH, Math.round(contentCenterY - renderH / 2)));
+      }
+
+      // Build drawables from characters — apply camera offset
       const drawables: Drawable[] = [];
       for (const ch of office.characters.values()) {
         let sprite: string[][];
 
         if (assets.characters.length > 0) {
-          // Use real sprites from loaded assets
           const rawSprite = getCharacterSprite(assets, ch.palette, ch.state, ch.dir, ch.frame);
           sprite = zoom === 1 ? rawSprite : scaleSprite(rawSprite, zoom);
         } else {
-          // Fallback to placeholder if no assets loaded
           const rawSprite = createFallbackCharacterSprite(ch.palette, ch.state === 'type', ch.frame);
           sprite = zoom === 1 ? rawSprite : scaleSprite(rawSprite, zoom);
         }
 
         drawables.push({
           sprite,
-          x: Math.round(ch.x * zoom),
-          y: Math.round((ch.y - 16) * zoom), // Characters are 16x32, offset up
+          x: Math.round(ch.x * zoom) - camOffsetX,
+          y: Math.round((ch.y - 16) * zoom) - camOffsetY,
           zY: ch.y * zoom,
         });
       }
 
-      // Add floor tile drawables (layout-aware)
+      // Add floor tile drawables (layout-aware) — apply camera offset
       const floorDrawables = createFloorDrawables(office.cols, office.rows, zoom, assets, officeLayout);
+      for (const d of floorDrawables) {
+        d.x -= camOffsetX;
+        d.y -= camOffsetY;
+      }
       drawables.push(...floorDrawables);
 
-      // Add wall tile drawables
+      // Add wall tile drawables — apply camera offset
       const wallDrawables = createWallDrawables(wallInstances, zoom);
+      for (const d of wallDrawables) {
+        d.x -= camOffsetX;
+        d.y -= camOffsetY;
+      }
       drawables.push(...wallDrawables);
 
-      // Add furniture drawables
+      // Add furniture drawables — apply camera offset
       const furnDrawables = createFurnitureDrawables(furnitureInstances, zoom);
+      for (const d of furnDrawables) {
+        d.x -= camOffsetX;
+        d.y -= camOffsetY;
+      }
       drawables.push(...furnDrawables);
 
       // Rasterize to PixelBuffer
